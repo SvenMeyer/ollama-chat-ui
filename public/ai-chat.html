@@ -68,6 +68,7 @@ function appendMessage(sender, text) {
     msgDiv.appendChild(contentSpan);
     chat.appendChild(msgDiv);
     chat.scrollTop = chat.scrollHeight;
+    return { msgDiv, contentSpan };
 }
 
 function appendStats(statsText) {
@@ -291,12 +292,14 @@ function handleSlashCommand(command) {
 
 /* ---------- Query Ollama ---------- */
 async function queryOllama() {
+    let placeholder = null;
+    let assistantText = '';
     try {
         const start = performance.now();
         const payload = {
             model: selectedModel,
             messages: conversation,
-            stream: false
+            stream: true
         };
         if (Object.keys(sessionOptions).length > 0) {
             payload.options = { ...sessionOptions };
@@ -310,25 +313,87 @@ async function queryOllama() {
             body: JSON.stringify(payload)
         });
         if (!resp.ok) throw new Error('Chat API returned status ' + resp.status);
-        const data = await resp.json();
+        if (!resp.body) throw new Error('Streaming not supported in this environment');
+
+        const { contentSpan } = appendMessage('assistant', '');
+        placeholder = contentSpan;
+        const chat = document.getElementById('chat');
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let finalMeta = {};
+
+        const processLine = line => {
+            if (!line) return;
+            const normalized = line.startsWith('data:') ? line.slice(5).trim() : line;
+            if (!normalized || normalized === '[DONE]') {
+                if (normalized === '[DONE]') {
+                    finalMeta.done = true;
+                }
+                return;
+            }
+            let data;
+            try {
+                data = JSON.parse(normalized);
+            } catch (err) {
+                console.warn('Unable to parse stream chunk:', err, normalized);
+                return;
+            }
+            if (data.message && typeof data.message.content === 'string') {
+                assistantText += data.message.content;
+                contentSpan.textContent = ` ${assistantText}`;
+                chat.scrollTop = chat.scrollHeight;
+            }
+            if (data.options && typeof data.options.num_ctx === 'number') {
+                if (!userSetContext) {
+                    sessionOptions.num_ctx = data.options.num_ctx;
+                }
+                currentModelContextLimit = data.options.num_ctx;
+            }
+            if (data.done) {
+                finalMeta = data;
+            }
+        };
+
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            let newlineIndex;
+            while ((newlineIndex = buffer.indexOf('\n')) >= 0) {
+                const line = buffer.slice(0, newlineIndex).trim();
+                buffer = buffer.slice(newlineIndex + 1);
+                processLine(line);
+            }
+        }
+        buffer += decoder.decode();
+        const remainder = buffer.trim();
+        if (remainder) {
+            processLine(remainder);
+        }
         const end = performance.now();
-        const promptTokens = typeof data.prompt_eval_count === 'number' ? data.prompt_eval_count : null;
-        const completionTokens = typeof data.eval_count === 'number' ? data.eval_count : null;
+
+        if (finalMeta.error) {
+            throw new Error(finalMeta.error);
+        }
+
+        if (assistantText) {
+            conversation.push({ role: 'assistant', content: assistantText });
+        }
+
+        const promptTokens = typeof finalMeta.prompt_eval_count === 'number' ? finalMeta.prompt_eval_count : null;
+        const completionTokens = typeof finalMeta.eval_count === 'number' ? finalMeta.eval_count : null;
         const totalTokens = (promptTokens ?? 0) + (completionTokens ?? 0);
         const hasTokenMetrics = promptTokens !== null || completionTokens !== null;
-        const durationMs = data.total_duration ? data.total_duration / 1_000_000 : (end - start);
+        const durationMs = finalMeta.total_duration ? finalMeta.total_duration / 1_000_000 : (end - start);
         const tokensPerSecondValue = hasTokenMetrics && durationMs > 0 && totalTokens > 0 ? (totalTokens / (durationMs / 1000)) : null;
         const tokensPerSecondLabel = tokensPerSecondValue !== null ? tokensPerSecondValue.toFixed(2) : 'n/a';
-        let assistantText = '';
-        if (data.message && data.message.content) {
-            assistantText = data.message.content;
-        } else if (data.output && data.output.content) {   // alternate structure
-            assistantText = data.output.content;
-        } else {
-            assistantText = '⛔ Unexpected response structure.';
+        if (finalMeta.options && typeof finalMeta.options.num_ctx === 'number') {
+            if (!userSetContext) {
+                sessionOptions.num_ctx = finalMeta.options.num_ctx;
+            }
+            currentModelContextLimit = finalMeta.options.num_ctx;
         }
-        appendMessage('assistant', assistantText);
-        conversation.push({ role: 'assistant', content: assistantText });
         const ctxUsed = promptTokens ?? 'n/a';
         const tokensLabel = hasTokenMetrics ? formatNumber(totalTokens) : 'n/a';
         const ctxUsedLabel = typeof ctxUsed === 'number' ? formatNumber(ctxUsed) : ctxUsed;
@@ -339,7 +404,11 @@ async function queryOllama() {
         appendStats(statsLine);
     } catch (err) {
         console.error(err);
-        appendMessage('assistant', '⛔ Error communicating with Ollama: ' + err.message);
+        if (placeholder) {
+            placeholder.textContent = ` ⛔ Error: ${err.message}`;
+        } else {
+            appendMessage('assistant', '⛔ Error communicating with Ollama: ' + err.message);
+        }
     }
 }
 

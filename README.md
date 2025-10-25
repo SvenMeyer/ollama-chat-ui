@@ -10,6 +10,7 @@ Static HTML interface that talks to a local Ollama instance (`http://localhost:1
 ## Quick Start
 
 ```bash
+cd public
 python3 -m http.server 8000
 # then open http://localhost:8000/ai-chat.html
 ```

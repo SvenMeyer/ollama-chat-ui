@@ -63,7 +63,7 @@ function appendMessage(sender, text) {
     labelSpan.textContent = sender === 'user' ? 'User :' : 'Agent:';
     const contentSpan = document.createElement('span');
     contentSpan.classList.add('content');
-    contentSpan.textContent = ` ${text}`;
+    contentSpan.textContent = text;
     msgDiv.appendChild(labelSpan);
     msgDiv.appendChild(contentSpan);
     chat.appendChild(msgDiv);
@@ -341,7 +341,7 @@ async function queryOllama() {
             }
             if (data.message && typeof data.message.content === 'string') {
                 assistantText += data.message.content;
-                contentSpan.textContent = ` ${assistantText}`;
+                contentSpan.textContent = assistantText;
                 chat.scrollTop = chat.scrollHeight;
             }
             if (data.options && typeof data.options.num_ctx === 'number') {

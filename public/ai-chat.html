@@ -12,7 +12,7 @@
     #controls {display:flex; flex-direction:column; gap:0.5rem;}
     #modelSelect {padding:.5rem;font-size:1rem;width:100%;font-family:inherit;}
     #modelSelect option {font-family:inherit;}
-    button {padding:.5rem 1rem;font-size:1rem;}
+    button {padding:.5rem 1rem;font-size:1rem; cursor:pointer;}
     #chat {flex:1; border:1px solid #ddd;background:#fff;padding:1rem;overflow:auto; box-sizing:border-box;}
     .msg {margin:.5rem 0; display:flex; gap:.5rem; align-items:flex-start;}
     .msg span.label {font-weight:bold; min-width:6ch; display:inline-block;}
@@ -27,9 +27,20 @@
         font-size:0.875rem;
         border-radius:4px;
     }
-    #inputArea {display:flex; gap:0.5rem; align-items:flex-end;}
+    #inputArea {display:flex; gap:0.5rem; align-items:stretch;}
     #inputBox {flex:1; resize:vertical; min-height:6rem; max-height:12rem; padding:.5rem; font-size:1rem; font-family:inherit; box-sizing:border-box;}
-    #sendBtn {align-self:flex-end;}
+    #buttonStack {display:flex; flex-direction:column; gap:0.5rem; align-self:stretch; width:9rem;}
+    #buttonStack button {flex:1; min-height:2.5rem;}
+    #sendBtn {flex:2; font-weight:bold;}
+    .status-bar {
+        padding:0.35rem 0.75rem;
+        background:#1f1f1f;
+        color:#f4f4f4;
+        font-size:0.9rem;
+        border-radius:4px;
+        font-family:inherit;
+    }
+    .status-bar.near-limit {background:#8b0000;}
 </style>
 </head>
 <body>
@@ -43,391 +54,579 @@
     <div id="chat"></div>
     <div id="inputArea">
         <textarea id="inputBox" placeholder="Type your message… (Enter to send, Shift+Enter for newline)"></textarea>
-        <button id="sendBtn">Send</button>
+        <div id="buttonStack">
+            <button id="copyAllBtn">Copy all</button>
+            <button id="copyMsgBtn">Copy msg</button>
+            <button id="sendBtn">Send</button>
+        </div>
     </div>
+    <div id="statusBar" class="status-bar">ctx used: n/a/n/a | in n/a | out n/a | 0.000s | n/a tok/s</div>
 </main>
 <script>
-/* ---------- Configuration ---------- */
-const OLLAMA_URL = 'http://localhost:11434';   // change if your Ollama instance is elsewhere
+const OLLAMA_URL = 'http://localhost:11434';
 const MODEL_STORAGE_KEY = 'ollamaSelectedModel';
 const CTX_STORAGE_KEY = 'ollamaModelCtxOverrides';
 const numberFormatter = new Intl.NumberFormat();
 
-/* ---------- Utility Functions ---------- */
-function appendMessage(sender, text) {
-    const chat = document.getElementById('chat');
-    const msgDiv = document.createElement('div');
-    msgDiv.classList.add('msg', sender);
-    const labelSpan = document.createElement('span');
-    labelSpan.classList.add('label');
-    labelSpan.textContent = sender === 'user' ? 'User :' : 'Agent:';
-    const contentSpan = document.createElement('span');
-    contentSpan.classList.add('content');
-    contentSpan.textContent = text;
-    msgDiv.appendChild(labelSpan);
-    msgDiv.appendChild(contentSpan);
-    chat.appendChild(msgDiv);
-    chat.scrollTop = chat.scrollHeight;
-    return { msgDiv, contentSpan };
+let selectedModel = null;
+let availableModels = [];
+const conversation = [];
+const ctxByModel = new Map();
+const optionsByModel = new Map();
+let currentModelContextLimit = null;
+let ctxOverrides = {};
+let aggregatePromptTokens = 0;
+let aggregateCompletionTokens = 0;
+let aggregateDurationMs = 0;
+
+try {
+    const stored = window.localStorage.getItem(CTX_STORAGE_KEY);
+    if (stored) ctxOverrides = JSON.parse(stored) || {};
+} catch (err) {
+    console.warn('Unable to load context overrides:', err);
+    ctxOverrides = {};
 }
 
-function appendStats(statsText) {
+function appendMessage(role, text) {
     const chat = document.getElementById('chat');
-    const statsDiv = document.createElement('div');
-    statsDiv.classList.add('stats');
-    statsDiv.textContent = statsText;
-    chat.appendChild(statsDiv);
+    const wrapper = document.createElement('div');
+    wrapper.classList.add('msg', role);
+    const label = document.createElement('span');
+    label.classList.add('label');
+    label.textContent = role === 'user' ? 'User :' : 'Agent:';
+    const content = document.createElement('span');
+    content.classList.add('content');
+    content.textContent = text;
+    wrapper.appendChild(label);
+    wrapper.appendChild(content);
+    chat.appendChild(wrapper);
+    chat.scrollTop = chat.scrollHeight;
+    return { contentSpan: content };
+}
+
+function appendStats(text) {
+    const chat = document.getElementById('chat');
+    const div = document.createElement('div');
+    div.classList.add('stats');
+    div.textContent = text;
+    chat.appendChild(div);
     chat.scrollTop = chat.scrollHeight;
 }
 
 function formatNumber(value) {
-    return typeof value === 'number' && Number.isFinite(value) ? numberFormatter.format(value) : value;
+    return typeof value === 'number' && Number.isFinite(value) ? numberFormatter.format(value) : 'n/a';
 }
 
-/* ---------- State ---------- */
-let selectedModel = null;
-let conversation = []; // array of {role, content}
-let availableModels = [];
-let sessionOptions = {};
-let currentModelContextLimit = null;
-let userSetContext = false;
-let ctxOverrides = {};
+function buildMetricsLine({ usedCtx = null, numCtx = null, promptTokens = null, completionTokens = null, durationMs = null, tokensPerSecond = null }) {
+    const usedLabel = Number.isFinite(usedCtx) ? formatNumber(usedCtx) : 'n/a';
+    const limitLabel = Number.isFinite(numCtx) ? formatNumber(numCtx) : 'n/a';
+    const pct = Number.isFinite(usedCtx) && Number.isFinite(numCtx) && numCtx > 0 ? Math.round((usedCtx / numCtx) * 100) : null;
+    const promptLabel = Number.isFinite(promptTokens) ? formatNumber(promptTokens) : 'n/a';
+    const completionLabel = Number.isFinite(completionTokens) ? formatNumber(completionTokens) : 'n/a';
+    const durationLabel = Number.isFinite(durationMs) ? `${(durationMs / 1000).toFixed(3)}s` : '0.000s';
+    const tokPerSecondLabel = Number.isFinite(tokensPerSecond) ? `${tokensPerSecond.toFixed(2)} tok/s` : 'n/a tok/s';
+    const parts = [
+        `ctx used: ${usedLabel}/${limitLabel}${pct !== null ? ` (${pct}%)` : ''}`,
+        `in ${promptLabel}`,
+        `out ${completionLabel}`,
+        durationLabel,
+        tokPerSecondLabel
+    ];
+    return { line: parts.join(' | '), pct };
+}
 
-try {
-    const storedOverrides = window.localStorage.getItem(CTX_STORAGE_KEY);
-    if (storedOverrides) {
-        ctxOverrides = JSON.parse(storedOverrides);
+function renderStatusBar() {
+    const bar = document.getElementById('statusBar');
+    if (!bar) return;
+    const ctxArray = selectedModel ? ctxByModel.get(selectedModel) : null;
+    const usedCtx = Array.isArray(ctxArray) ? ctxArray.length : null;
+    const numCtx = Number.isFinite(currentModelContextLimit) ? currentModelContextLimit : null;
+    const promptTokens = aggregatePromptTokens;
+    const completionTokens = aggregateCompletionTokens;
+    const totalTokens = promptTokens + completionTokens;
+    const durationMs = aggregateDurationMs;
+    const tokensPerSecond = totalTokens > 0 && durationMs > 0 ? totalTokens / (durationMs / 1000) : null;
+    const { line, pct } = buildMetricsLine({ usedCtx, numCtx, promptTokens, completionTokens, durationMs, tokensPerSecond });
+    bar.textContent = line;
+    if (pct !== null && pct >= 85) {
+        bar.classList.add('near-limit');
+    } else {
+        bar.classList.remove('near-limit');
     }
-} catch (err) {
-    console.warn('Unable to parse stored context overrides:', err);
-    ctxOverrides = {};
 }
 
-/* ---------- Populate Model List ---------- */
+function conversationAsText(messages = conversation) {
+    return messages.map(entry => {
+        const label = entry.role === 'user' ? 'User' : entry.role === 'assistant' ? 'Assistant' : 'System';
+        return `${label}: ${entry.content}`;
+    }).join('\n\n');
+}
+
+function getLastExchangeText() {
+    if (conversation.length === 0) return '';
+    let assistantIndex = -1;
+    for (let i = conversation.length - 1; i >= 0; i -= 1) {
+        if (conversation[i].role === 'assistant') {
+            assistantIndex = i;
+            break;
+        }
+    }
+    if (assistantIndex === -1) {
+        const lastUser = conversation.slice().reverse().find(entry => entry.role === 'user');
+        return lastUser ? `User: ${lastUser.content}` : '';
+    }
+    let userIndex = -1;
+    for (let i = assistantIndex - 1; i >= 0; i -= 1) {
+        if (conversation[i].role === 'user') {
+            userIndex = i;
+            break;
+        }
+    }
+    const parts = [];
+    if (userIndex !== -1) parts.push(`User: ${conversation[userIndex].content}`);
+    parts.push(`Assistant: ${conversation[assistantIndex].content}`);
+    return parts.join('\n\n');
+}
+
+async function copyAllConversation() {
+    try {
+        await navigator.clipboard.writeText(conversationAsText());
+        appendStats('Copied conversation to clipboard.');
+    } catch (err) {
+        appendStats('Clipboard copy failed: ' + err.message);
+    }
+}
+
+async function copyLastExchange() {
+    const text = getLastExchangeText();
+    if (!text) {
+        appendStats('Nothing to copy yet.');
+        return;
+    }
+    try {
+        await navigator.clipboard.writeText(text);
+        appendStats('Copied last exchange to clipboard.');
+    } catch (err) {
+        appendStats('Clipboard copy failed: ' + err.message);
+    }
+}
+
+function labelActiveModel(model) {
+    const select = document.getElementById('modelSelect');
+    Array.from(select.options).forEach(opt => {
+        const base = opt.value;
+        opt.textContent = opt.value === model ? `${base} (active)` : base;
+    });
+}
+
 async function loadModels() {
     try {
         const resp = await fetch(`${OLLAMA_URL}/api/tags`);
         if (!resp.ok) throw new Error('Failed to fetch models');
         const data = await resp.json();
+        availableModels = [];
         const select = document.getElementById('modelSelect');
         select.innerHTML = '';
-        availableModels = [];
-        data.models.forEach(m => {
-            const opt = document.createElement('option');
-            const modelName = m.model || m.name;
-            opt.value = modelName;
-            opt.textContent = modelName;
-            select.appendChild(opt);
+        data.models.forEach(entry => {
+            const modelName = entry.model || entry.name;
+            const option = document.createElement('option');
+            option.value = modelName;
+            option.textContent = modelName;
             availableModels.push(modelName);
+            select.appendChild(option);
         });
-        if (data.models.length > 0) {
-            await setDefaultModel(select);
-        }
+        if (availableModels.length === 0) return;
+        await setDefaultModel(select);
     } catch (err) {
         console.error(err);
-        alert('Could not connect to Ollama API. Make sure it is running on ' + OLLAMA_URL);
+        alert('Could not connect to Ollama API. Ensure it runs at ' + OLLAMA_URL);
     }
 }
 
 async function setDefaultModel(selectEl) {
-    const preference = window.localStorage.getItem(MODEL_STORAGE_KEY);
-    if (preference && availableModels.includes(preference)) {
-        selectEl.value = preference;
-        await handleModelSelection(preference, { preserveHistory: true });
+    const stored = window.localStorage.getItem(MODEL_STORAGE_KEY);
+    if (stored && availableModels.includes(stored)) {
+        selectEl.value = stored;
+        await handleModelSelection(stored, { initial: true });
         return;
     }
     try {
         const resp = await fetch(`${OLLAMA_URL}/api/ps`);
-        if (!resp.ok) throw new Error('Failed to fetch running models');
-        const data = await resp.json();
-        const running = data.models && data.models.length > 0 ? (data.models[0].model || data.models[0].name) : null;
-        if (running && availableModels.includes(running)) {
-            selectEl.value = running;
-            await handleModelSelection(running, { preserveHistory: true });
-            return;
+        if (resp.ok) {
+            const data = await resp.json();
+            const running = data.models?.[0];
+            const name = running ? (running.model || running.name) : null;
+            if (name && availableModels.includes(name)) {
+                selectEl.value = name;
+                await handleModelSelection(name, { initial: true });
+                return;
+            }
         }
     } catch (err) {
-        console.warn('Could not determine running model:', err);
+        console.warn('Unable to determine active model:', err);
     }
-    const overrideModels = Object.keys(ctxOverrides || {}).filter(model => availableModels.includes(model));
-    if (overrideModels.length > 0) {
-        const overrideChoice = overrideModels[0];
-        selectEl.value = overrideChoice;
-        await handleModelSelection(overrideChoice, { preserveHistory: true });
+    const overrideCandidates = Object.keys(ctxOverrides).find(model => availableModels.includes(model));
+    if (overrideCandidates) {
+        selectEl.value = overrideCandidates;
+        await handleModelSelection(overrideCandidates, { initial: true });
         return;
     }
-    if (availableModels.length > 0) {
-        const fallback = availableModels[0];
-        selectEl.value = fallback;
-        await handleModelSelection(fallback, { preserveHistory: true });
+    const fallback = availableModels[0];
+    selectEl.value = fallback;
+    await handleModelSelection(fallback, { initial: true });
+}
+
+function getModelOptions(model) {
+    if (!optionsByModel.has(model)) {
+        const base = {};
+        if (ctxOverrides[model]) base.num_ctx = ctxOverrides[model];
+        optionsByModel.set(model, base);
     }
+    return optionsByModel.get(model);
 }
 
-function labelActiveModel(activeModel) {
-    const select = document.getElementById('modelSelect');
-    Array.from(select.options).forEach(opt => {
-        const baseLabel = opt.value;
-        opt.textContent = opt.value === activeModel ? `${baseLabel} (active)` : baseLabel;
-    });
-}
-
-async function handleModelSelection(model, { preserveHistory = false } = {}) {
+async function handleModelSelection(model, { initial = false } = {}) {
     if (!model) return;
     selectedModel = model;
     window.localStorage.setItem(MODEL_STORAGE_KEY, model);
-    const select = document.getElementById('modelSelect');
-    if (select && select.value !== model) {
-        select.value = model;
-    }
     labelActiveModel(model);
-    if (!preserveHistory) {
-        conversation = [];
-        const chat = document.getElementById('chat');
-        if (chat) {
-            chat.innerHTML = '';
-        }
+    const options = getModelOptions(model);
+    currentModelContextLimit = options.num_ctx ?? null;
+    await refreshModelNumCtx(model);
+    if (!initial && conversation.length > 0) {
+        await hydrateContextForModel(model);
+    } else {
+        ctxByModel.set(model, ctxByModel.get(model) || []);
+        renderStatusBar();
     }
-    sessionOptions = {};
-    userSetContext = false;
-    currentModelContextLimit = null;
-    if (ctxOverrides[model]) {
-        sessionOptions.num_ctx = ctxOverrides[model];
-        currentModelContextLimit = ctxOverrides[model];
-        userSetContext = true;
-    }
-    await refreshModelContext(model);
 }
 
-async function refreshModelContext(model) {
-    if (!model) return;
+async function refreshModelNumCtx(model) {
+    const live = await getLiveNumCtx(model);
+    if (Number.isFinite(live)) {
+        currentModelContextLimit = live;
+    } else if (!Number.isFinite(currentModelContextLimit)) {
+        currentModelContextLimit = null;
+    }
+    renderStatusBar();
+}
+
+function extractNumCtx(info) {
+    if (!info || typeof info !== 'object') return null;
+    const candidates = [
+        info.options?.parameters?.num_ctx,
+        info.parameters?.num_ctx,
+        info.parameters?.num_ctx_value,
+        info.model_info?.context_length,
+        info.model_info?.max_context_length,
+        info.model_info?.num_ctx,
+        info.context_length
+    ];
+    for (const value of candidates) {
+        if (Number.isFinite(value)) return value;
+    }
+    const strings = [info.parameters, info.modelfile];
+    for (const block of strings) {
+        if (typeof block !== 'string') continue;
+        const match = block.match(/(?:^|\n)\s*(?:PARAMETER\s+)?num_ctx\s*(?:=|\s)\s*(\d+)/);
+        if (match) return parseInt(match[1], 10);
+    }
+    return null;
+}
+
+async function getLiveNumCtx(model) {
+    if (!model) return null;
     try {
         const resp = await fetch(`${OLLAMA_URL}/api/show`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-            body: JSON.stringify({ model })
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model, name: model, verbose: true })
         });
-        if (!resp.ok) throw new Error('Failed to fetch model info');
-        const info = await resp.json();
-        let ctx = null;
-        if (typeof info.context_length === 'number') {
-            ctx = info.context_length;
-        } else if (info.model_info && typeof info.model_info.context_length === 'number') {
-            ctx = info.model_info.context_length;
-        } else if (typeof info.parameters === 'string') {
-            const match = info.parameters.match(/num_ctx\s*=\s*(\d+)/);
-            if (match) {
-                ctx = parseInt(match[1], 10);
-            }
-        }
-        if (!userSetContext && ctx) {
-            sessionOptions.num_ctx = ctx;
-        }
-        if (!currentModelContextLimit && ctx) {
-            currentModelContextLimit = ctx;
+        if (resp.ok) {
+            const data = await resp.json();
+            const ctx = extractNumCtx(data);
+            if (Number.isFinite(ctx)) return ctx;
         }
     } catch (err) {
-        console.warn('Could not load model context information:', err);
+        console.warn('api/show failed:', err);
+    }
+    try {
+        const resp = await fetch(`${OLLAMA_URL}/api/ps`);
+        if (!resp.ok) return null;
+        const data = await resp.json();
+        const entry = data.models?.find(item => {
+            const candidateName = item.name || item.model;
+            if (!candidateName) return false;
+            return candidateName === model || model === candidateName || model.startsWith(candidateName) || candidateName.startsWith(model);
+        });
+        if (!entry) return null;
+        const ctx = entry.context ?? entry.num_ctx;
+        return Number.isFinite(ctx) ? ctx : null;
+    } catch (err) {
+        console.warn('api/ps fallback failed:', err);
+    }
+    return null;
+}
+
+function buildPromptForUserInput(text) {
+    const clean = text.replace(/\r\n/g, '\n');
+    const needsLeadingBreak = (ctxByModel.get(selectedModel)?.length ?? 0) > 0;
+    const prefix = needsLeadingBreak ? '\n\n' : '';
+    return `${prefix}User: ${clean}\n\nAssistant:`;
+}
+
+function serializeConversation(messages, includeAssistantCue = false) {
+    const body = messages.map(entry => {
+        const label = entry.role === 'user' ? 'User' : entry.role === 'assistant' ? 'Assistant' : 'System';
+        return `${label}: ${entry.content}`;
+    }).join('\n\n');
+    if (includeAssistantCue) {
+        return body ? `${body}\n\nAssistant:` : 'Assistant:';
+    }
+    return body;
+}
+
+async function hydrateContextForModel(model) {
+    if (!model) return;
+    if (conversation.length === 0) {
+        ctxByModel.set(model, []);
+        renderStatusBar();
+        return;
+    }
+    try {
+        const prompt = serializeConversation(conversation, false);
+        const options = { ...getModelOptions(model), num_predict: 0 };
+        const resp = await fetch(`${OLLAMA_URL}/api/generate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model, prompt, stream: true, context: [], options })
+        });
+        if (!resp.ok || !resp.body) throw new Error(`generation failed (${resp.status})`);
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let latestContext = [];
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            let newline;
+            while ((newline = buffer.indexOf('\n')) >= 0) {
+                const line = buffer.slice(0, newline).trim();
+                buffer = buffer.slice(newline + 1);
+                if (!line) continue;
+                const payload = line.startsWith('data:') ? line.slice(5).trim() : line;
+                if (!payload || payload === '[DONE]') continue;
+                try {
+                    const evt = JSON.parse(payload);
+                    if (evt.done && Array.isArray(evt.context)) {
+                        latestContext = evt.context;
+                    }
+                } catch (err) {
+                    console.warn('hydrate chunk parse failed:', err);
+                }
+            }
+        }
+        const leftover = buffer.trim();
+        if (leftover && leftover !== '[DONE]') {
+            try {
+                const evt = JSON.parse(leftover.startsWith('data:') ? leftover.slice(5).trim() : leftover);
+                if (evt.done && Array.isArray(evt.context)) {
+                    latestContext = evt.context;
+                }
+            } catch (err) {
+                console.warn('hydrate final chunk parse failed:', err);
+            }
+        }
+        ctxByModel.set(model, Array.isArray(latestContext) ? latestContext : []);
+        renderStatusBar();
+    } catch (err) {
+        console.warn('hydrateContextForModel failed:', err);
+        ctxByModel.set(model, []);
     }
 }
 
-/* ---------- Send Message ---------- */
 async function sendMessage() {
     const input = document.getElementById('inputBox');
-    const rawText = input.value;
-    if (!rawText.trim()) return;
-    const trimmed = rawText.trim();
-    if (trimmed.startsWith('/')) {
-        const handled = handleSlashCommand(trimmed);
+    const raw = input.value;
+    if (!raw.trim()) return;
+    if (raw.trim().startsWith('/')) {
+        const handled = handleSlashCommand(raw.trim());
         input.value = '';
-        if (!handled) {
-            appendStats(`unknown command: ${trimmed}`);
-        }
+        if (!handled) appendStats(`Unknown command: ${raw.trim()}`);
         return;
     }
-    appendMessage('user', rawText);
-    conversation.push({ role: 'user', content: rawText });
+    appendMessage('user', raw);
+    conversation.push({ role: 'user', content: raw });
     input.value = '';
-    await queryOllama();
+    await generateAssistantReply(raw);
 }
 
 function handleSlashCommand(command) {
-    const args = command.slice(1).trim().split(/\s+/);
-    const primary = args[0]?.toLowerCase();
-    if (primary === 'set' && args[1]?.toLowerCase() === 'parameter' && args[2]) {
-        const param = args[2];
-        const value = args[3];
-        if (param.toLowerCase() === 'num_ctx' && value) {
+    const parts = command.slice(1).trim().split(/\s+/);
+    const action = parts[0]?.toLowerCase();
+    if (action === 'clear') {
+        clearConversation();
+        return true;
+    }
+    if (action === 'set' && parts[1]?.toLowerCase() === 'parameter') {
+        const param = parts[2]?.toLowerCase();
+        const value = parts[3];
+        if (param === 'num_ctx' && value) {
             const numeric = parseInt(value, 10);
-            if (!Number.isNaN(numeric) && numeric > 0) {
-                if (!selectedModel) {
-                    appendStats('No model selected to apply num_ctx');
-                    return true;
-                }
-                sessionOptions = { ...sessionOptions, num_ctx: numeric };
-                currentModelContextLimit = numeric;
-                userSetContext = true;
+            if (Number.isFinite(numeric) && numeric > 0) {
                 ctxOverrides[selectedModel] = numeric;
                 try {
                     window.localStorage.setItem(CTX_STORAGE_KEY, JSON.stringify(ctxOverrides));
                 } catch (err) {
-                    console.warn('Unable to store context override:', err);
+                    console.warn('Unable to persist context override:', err);
                 }
-                appendStats(`Set parameter 'num_ctx' to '${numeric}'`);
+                const options = getModelOptions(selectedModel);
+                options.num_ctx = numeric;
+                currentModelContextLimit = numeric;
+                renderStatusBar();
+                appendStats(`Set num_ctx to ${numeric}.`);
                 return true;
             }
-            appendStats(`Invalid num_ctx value: ${value}`);
+            appendStats('Invalid num_ctx value: ' + value);
             return true;
         }
-        appendStats(`Unsupported parameter: ${param}`);
-        return true;
-    }
-    if (primary === 'clear') {
-        conversation = [];
-        document.getElementById('chat').innerHTML = '';
-        appendStats('Conversation cleared');
+        appendStats('Unsupported parameter: ' + (parts[2] ?? ''));
         return true;
     }
     return false;
 }
 
-/* ---------- Query Ollama ---------- */
-async function queryOllama() {
-    let placeholder = null;
-    let assistantText = '';
-    try {
-        const start = performance.now();
-        const payload = {
-            model: selectedModel,
-            messages: conversation,
-            stream: true
-        };
-        if (Object.keys(sessionOptions).length > 0) {
-            payload.options = { ...sessionOptions };
-            if (typeof payload.options.num_ctx === 'number') {
-                currentModelContextLimit = payload.options.num_ctx;
-            }
-        }
-        const resp = await fetch(`${OLLAMA_URL}/api/chat`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-            body: JSON.stringify(payload)
-        });
-        if (!resp.ok) throw new Error('Chat API returned status ' + resp.status);
-        if (!resp.body) throw new Error('Streaming not supported in this environment');
+function clearConversation() {
+    conversation.length = 0;
+    const chat = document.getElementById('chat');
+    chat.innerHTML = '';
+    if (selectedModel) ctxByModel.set(selectedModel, []);
+    aggregatePromptTokens = 0;
+    aggregateCompletionTokens = 0;
+    aggregateDurationMs = 0;
+    renderStatusBar();
+    appendStats('Conversation cleared.');
+}
 
-        const { contentSpan } = appendMessage('assistant', '');
-        placeholder = contentSpan;
-        const chat = document.getElementById('chat');
+async function generateAssistantReply(userText) {
+    if (!selectedModel) {
+        appendStats('Select a model first.');
+        return;
+    }
+    const options = { ...getModelOptions(selectedModel) };
+    const liveNumCtx = await getLiveNumCtx(selectedModel);
+    if (Number.isFinite(liveNumCtx)) {
+        currentModelContextLimit = liveNumCtx;
+    }
+    const context = ctxByModel.get(selectedModel) || [];
+    const prompt = buildPromptForUserInput(userText);
+    const body = { model: selectedModel, prompt, stream: true, context };
+    if (Object.keys(options).length > 0) body.options = options;
+    const start = performance.now();
+    const { contentSpan } = appendMessage('assistant', '');
+    let assistantText = '';
+    let newContext = context;
+    let promptTokens = null;
+    let completionTokens = null;
+    let totalTokens = null;
+    try {
+        const resp = await fetch(`${OLLAMA_URL}/api/generate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+        if (!resp.ok || !resp.body) throw new Error(`generate failed (${resp.status})`);
         const reader = resp.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
-        let finalMeta = {};
-
-        const processLine = line => {
-            if (!line) return;
-            const normalized = line.startsWith('data:') ? line.slice(5).trim() : line;
-            if (!normalized || normalized === '[DONE]') {
-                if (normalized === '[DONE]') {
-                    finalMeta.done = true;
-                }
-                return;
-            }
-            let data;
+        const handlePayload = payload => {
+            if (!payload || payload === '[DONE]') return;
+            let evt;
             try {
-                data = JSON.parse(normalized);
+                evt = JSON.parse(payload.startsWith('data:') ? payload.slice(5).trim() : payload);
             } catch (err) {
-                console.warn('Unable to parse stream chunk:', err, normalized);
+                console.warn('Chunk parse failed:', err, payload);
                 return;
             }
-            if (data.message && typeof data.message.content === 'string') {
-                assistantText += data.message.content;
+            if (typeof evt.response === 'string') {
+                assistantText += evt.response;
                 contentSpan.textContent = assistantText;
+                const chat = document.getElementById('chat');
                 chat.scrollTop = chat.scrollHeight;
             }
-            if (data.options && typeof data.options.num_ctx === 'number') {
-                if (!userSetContext) {
-                    sessionOptions.num_ctx = data.options.num_ctx;
-                }
-                currentModelContextLimit = data.options.num_ctx;
-            }
-            if (data.done) {
-                finalMeta = data;
+            if (evt.done) {
+                if (Array.isArray(evt.context)) newContext = evt.context;
+                promptTokens = Number.isFinite(evt.prompt_tokens) ? evt.prompt_tokens : Number.isFinite(evt.prompt_eval_count) ? evt.prompt_eval_count : promptTokens;
+                completionTokens = Number.isFinite(evt.completion_tokens) ? evt.completion_tokens : Number.isFinite(evt.eval_count) ? evt.eval_count : completionTokens;
+                totalTokens = Number.isFinite(evt.total_tokens) ? evt.total_tokens : null;
             }
         };
-
         while (true) {
             const { value, done } = await reader.read();
             if (done) break;
             buffer += decoder.decode(value, { stream: true });
-            let newlineIndex;
-            while ((newlineIndex = buffer.indexOf('\n')) >= 0) {
-                const line = buffer.slice(0, newlineIndex).trim();
-                buffer = buffer.slice(newlineIndex + 1);
-                processLine(line);
+            let newline;
+            while ((newline = buffer.indexOf('\n')) >= 0) {
+                const line = buffer.slice(0, newline).trim();
+                buffer = buffer.slice(newline + 1);
+                handlePayload(line);
             }
         }
-        buffer += decoder.decode();
-        const remainder = buffer.trim();
-        if (remainder) {
-            processLine(remainder);
-        }
-        const end = performance.now();
-
-        if (finalMeta.error) {
-            throw new Error(finalMeta.error);
-        }
-
-        if (assistantText) {
-            conversation.push({ role: 'assistant', content: assistantText });
-        }
-
-        const promptTokens = typeof finalMeta.prompt_eval_count === 'number' ? finalMeta.prompt_eval_count : null;
-        const completionTokens = typeof finalMeta.eval_count === 'number' ? finalMeta.eval_count : null;
-        const totalTokens = (promptTokens ?? 0) + (completionTokens ?? 0);
-        const hasTokenMetrics = promptTokens !== null || completionTokens !== null;
-        const durationMs = finalMeta.total_duration ? finalMeta.total_duration / 1_000_000 : (end - start);
-        const tokensPerSecondValue = hasTokenMetrics && durationMs > 0 && totalTokens > 0 ? (totalTokens / (durationMs / 1000)) : null;
-        const tokensPerSecondLabel = tokensPerSecondValue !== null ? tokensPerSecondValue.toFixed(2) : 'n/a';
-        if (finalMeta.options && typeof finalMeta.options.num_ctx === 'number') {
-            if (!userSetContext) {
-                sessionOptions.num_ctx = finalMeta.options.num_ctx;
-            }
-            currentModelContextLimit = finalMeta.options.num_ctx;
-        }
-        const ctxUsed = promptTokens ?? 'n/a';
-        const tokensLabel = hasTokenMetrics ? formatNumber(totalTokens) : 'n/a';
-        const ctxUsedLabel = typeof ctxUsed === 'number' ? formatNumber(ctxUsed) : ctxUsed;
-        const ctxLimitValue = (payload.options && payload.options.num_ctx) ?? sessionOptions.num_ctx ?? currentModelContextLimit ?? 'n/a';
-        const ctxLimitLabel = typeof ctxLimitValue === 'number' ? formatNumber(ctxLimitValue) : ctxLimitValue;
-        const seconds = durationMs / 1000;
-        const statsLine = `time ${seconds.toFixed(3)}s · tokens ${tokensLabel} · ${tokensPerSecondLabel} tok/s · ctx ${ctxUsedLabel}/${ctxLimitLabel}`;
-        appendStats(statsLine);
+        const trailing = buffer.trim();
+        if (trailing) handlePayload(trailing);
     } catch (err) {
         console.error(err);
-        if (placeholder) {
-            placeholder.textContent = ` ⛔ Error: ${err.message}`;
-        } else {
-            appendMessage('assistant', '⛔ Error communicating with Ollama: ' + err.message);
-        }
+        contentSpan.textContent = `⛔ Error: ${err.message}`;
+        return;
     }
+    const end = performance.now();
+    const elapsedMs = end - start;
+    const resolvedPromptTokens = Number.isFinite(promptTokens) ? promptTokens : null;
+    const resolvedCompletionTokens = Number.isFinite(completionTokens) ? completionTokens : null;
+    const resolvedTotalTokens = Number.isFinite(totalTokens) ? totalTokens : ((resolvedPromptTokens ?? 0) + (resolvedCompletionTokens ?? 0) || null);
+    const tokenSum = Number.isFinite(resolvedTotalTokens) ? resolvedTotalTokens : ((resolvedPromptTokens ?? 0) + (resolvedCompletionTokens ?? 0));
+    const tokensPerSecond = tokenSum > 0 && elapsedMs > 0 ? tokenSum / (elapsedMs / 1000) : null;
+
+    ctxByModel.set(selectedModel, Array.isArray(newContext) ? newContext : []);
+    if (assistantText) {
+        conversation.push({ role: 'assistant', content: assistantText });
+    }
+    const usedCtx = Array.isArray(newContext) ? newContext.length : null;
+
+    aggregatePromptTokens += resolvedPromptTokens ?? 0;
+    aggregateCompletionTokens += resolvedCompletionTokens ?? 0;
+    aggregateDurationMs += elapsedMs;
+
+    renderStatusBar();
+
+    const { line } = buildMetricsLine({
+        usedCtx,
+        numCtx: currentModelContextLimit,
+        promptTokens: resolvedPromptTokens,
+        completionTokens: resolvedCompletionTokens,
+        durationMs: elapsedMs,
+        tokensPerSecond
+    });
+    appendStats(line);
 }
 
-/* ---------- Event Listeners ---------- */
 document.getElementById('sendBtn').addEventListener('click', sendMessage);
-document.getElementById('inputBox').addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
+document.getElementById('copyAllBtn').addEventListener('click', copyAllConversation);
+document.getElementById('copyMsgBtn').addEventListener('click', copyLastExchange);
+document.getElementById('inputBox').addEventListener('keydown', event => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
         sendMessage();
     }
 });
-document.getElementById('modelSelect').addEventListener('change', e => {
-    const model = e.target.value;
-    handleModelSelection(model).catch(err => console.error('Failed to switch model:', err));
-    console.log('Selected model:', model);
+document.getElementById('modelSelect').addEventListener('change', event => {
+    const model = event.target.value;
+    handleModelSelection(model).catch(err => console.error('Model switch failed:', err));
 });
 
-/* ---------- Initial Load ---------- */
 loadModels();
+renderStatusBar();
 </script>
 </body>
 </html>

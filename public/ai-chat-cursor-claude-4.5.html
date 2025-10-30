@@ -1,0 +1,648 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ollama Chat</title>
+<style>
+    * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+    }
+    
+    :root {
+        --bg-primary: #f8f9fa;
+        --bg-secondary: #ffffff;
+        --bg-header: linear-gradient(135deg, #667eea 0%, #4a5dc7 100%);
+        --text-primary: #2d3748;
+        --text-secondary: #718096;
+        --text-light: #a0aec0;
+        --border-color: #e2e8f0;
+        --blue-500: #4a5dc7;
+        --blue-600: #3c4db8;
+        --gray-700: #4a5568;
+        --gray-800: #2d3748;
+        --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.05);
+        --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.07);
+        --shadow-lg: 0 10px 20px rgba(0, 0, 0, 0.1);
+    }
+    
+    html, body {
+        height: 100%;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        background: var(--bg-primary);
+        color: var(--text-primary);
+        line-height: 1.6;
+    }
+    
+    body {
+        display: flex;
+        flex-direction: column;
+    }
+    
+    header {
+        background: var(--bg-header);
+        color: white;
+        padding: 1.25rem 1.5rem;
+        text-align: center;
+        box-shadow: var(--shadow-md);
+    }
+    
+    header h1 {
+        font-size: 1.5rem;
+        font-weight: 600;
+        letter-spacing: -0.025em;
+    }
+    
+    main {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        padding: 1.5rem;
+        max-width: 900px;
+        width: 100%;
+        margin: 0 auto;
+        gap: 1rem;
+        overflow: hidden;
+    }
+    
+    #controls {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+    }
+    
+    #modelSelect {
+        padding: 0.625rem 0.875rem;
+        font-size: 0.9375rem;
+        width: 100%;
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        background: var(--bg-secondary);
+        color: var(--text-primary);
+        cursor: pointer;
+        transition: all 0.2s ease;
+        box-shadow: var(--shadow-sm);
+    }
+    
+    #modelSelect:hover {
+        border-color: var(--blue-500);
+    }
+    
+    #modelSelect:focus {
+        outline: none;
+        border-color: var(--blue-500);
+        box-shadow: 0 0 0 3px rgba(74, 93, 199, 0.1);
+    }
+    
+    #chat {
+        flex: 1;
+        border: 1px solid var(--border-color);
+        background: var(--bg-secondary);
+        padding: 1.5rem;
+        overflow-y: auto;
+        border-radius: 12px;
+        box-shadow: var(--shadow-sm);
+        scroll-behavior: smooth;
+    }
+    
+    #chat::-webkit-scrollbar {
+        width: 8px;
+    }
+    
+    #chat::-webkit-scrollbar-track {
+        background: transparent;
+    }
+    
+    #chat::-webkit-scrollbar-thumb {
+        background: var(--border-color);
+        border-radius: 4px;
+    }
+    
+    #chat::-webkit-scrollbar-thumb:hover {
+        background: var(--text-light);
+    }
+    
+    .msg {
+        margin: 1rem 0;
+        display: flex;
+        gap: 0.75rem;
+        align-items: flex-start;
+        animation: fadeIn 0.3s ease;
+    }
+    
+    @keyframes fadeIn {
+        from {
+            opacity: 0;
+            transform: translateY(10px);
+        }
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
+    
+    .msg span.label {
+        font-weight: 600;
+        min-width: 4.5rem;
+        padding: 0.25rem 0.75rem;
+        border-radius: 6px;
+        font-size: 0.875rem;
+        text-align: center;
+    }
+    
+    .msg.user span.label {
+        background: linear-gradient(135deg, #667eea 0%, #4a5dc7 100%);
+        color: white;
+    }
+    
+    .msg.assistant span.label {
+        background: var(--gray-700);
+        color: white;
+    }
+    
+    .msg span.content {
+        flex: 1;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        padding-top: 0.25rem;
+        color: var(--text-primary);
+    }
+    
+    .stats {
+        margin: 0.75rem 0;
+        padding: 0.5rem 0.875rem;
+        background: linear-gradient(135deg, #4a5568 0%, #2d3748 100%);
+        color: #e2e8f0;
+        font-size: 0.8125rem;
+        border-radius: 8px;
+        font-family: "SF Mono", Monaco, "Cascadia Code", "Roboto Mono", Consolas, monospace;
+        box-shadow: var(--shadow-sm);
+    }
+    
+    #inputArea {
+        display: flex;
+        gap: 0.75rem;
+        align-items: flex-end;
+    }
+    
+    #inputBox {
+        flex: 1;
+        resize: vertical;
+        min-height: 4.5rem;
+        max-height: 12rem;
+        padding: 0.75rem;
+        font-size: 0.9375rem;
+        font-family: inherit;
+        border: 1px solid var(--border-color);
+        border-radius: 10px;
+        background: var(--bg-secondary);
+        color: var(--text-primary);
+        transition: all 0.2s ease;
+        box-shadow: var(--shadow-sm);
+    }
+    
+    #inputBox:hover {
+        border-color: var(--blue-500);
+    }
+    
+    #inputBox:focus {
+        outline: none;
+        border-color: var(--blue-500);
+        box-shadow: 0 0 0 3px rgba(74, 93, 199, 0.1);
+    }
+    
+    #inputBox::placeholder {
+        color: var(--text-light);
+    }
+    
+    button {
+        padding: 0.75rem 1.5rem;
+        font-size: 0.9375rem;
+        font-weight: 500;
+        background: linear-gradient(135deg, #667eea 0%, #4a5dc7 100%);
+        color: white;
+        border: none;
+        border-radius: 10px;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        box-shadow: var(--shadow-sm);
+        align-self: flex-end;
+    }
+    
+    button:hover {
+        transform: translateY(-1px);
+        box-shadow: var(--shadow-md);
+    }
+    
+    button:active {
+        transform: translateY(0);
+        box-shadow: var(--shadow-sm);
+    }
+    
+    button:focus {
+        outline: none;
+        box-shadow: 0 0 0 3px rgba(74, 93, 199, 0.3);
+    }
+</style>
+</head>
+<body>
+<header>
+    <h1>Ollama Chat</h1>
+</header>
+<main>
+    <div id="controls">
+        <select id="modelSelect"></select>
+    </div>
+    <div id="chat"></div>
+    <div id="inputArea">
+        <textarea id="inputBox" placeholder="Type your message… (Enter to send, Shift+Enter for newline)"></textarea>
+        <button id="sendBtn">Send</button>
+    </div>
+</main>
+<script>
+/* ---------- Configuration ---------- */
+const OLLAMA_URL = 'http://localhost:11434';   // change if your Ollama instance is elsewhere
+const MODEL_STORAGE_KEY = 'ollamaSelectedModel';
+const CTX_STORAGE_KEY = 'ollamaModelCtxOverrides';
+const numberFormatter = new Intl.NumberFormat();
+
+/* ---------- Utility Functions ---------- */
+function appendMessage(sender, text) {
+    const chat = document.getElementById('chat');
+    const msgDiv = document.createElement('div');
+    msgDiv.classList.add('msg', sender);
+    const labelSpan = document.createElement('span');
+    labelSpan.classList.add('label');
+    labelSpan.textContent = sender === 'user' ? 'User' : 'Agent';
+    const contentSpan = document.createElement('span');
+    contentSpan.classList.add('content');
+    contentSpan.textContent = text;
+    msgDiv.appendChild(labelSpan);
+    msgDiv.appendChild(contentSpan);
+    chat.appendChild(msgDiv);
+    chat.scrollTop = chat.scrollHeight;
+    return { msgDiv, contentSpan };
+}
+
+function appendStats(statsText) {
+    const chat = document.getElementById('chat');
+    const statsDiv = document.createElement('div');
+    statsDiv.classList.add('stats');
+    statsDiv.textContent = statsText;
+    chat.appendChild(statsDiv);
+    chat.scrollTop = chat.scrollHeight;
+}
+
+function formatNumber(value) {
+    return typeof value === 'number' && Number.isFinite(value) ? numberFormatter.format(value) : value;
+}
+
+/* ---------- State ---------- */
+let selectedModel = null;
+let conversation = []; // array of {role, content}
+let availableModels = [];
+let sessionOptions = {};
+let currentModelContextLimit = null;
+let userSetContext = false;
+let ctxOverrides = {};
+
+try {
+    const storedOverrides = window.localStorage.getItem(CTX_STORAGE_KEY);
+    if (storedOverrides) {
+        ctxOverrides = JSON.parse(storedOverrides);
+    }
+} catch (err) {
+    console.warn('Unable to parse stored context overrides:', err);
+    ctxOverrides = {};
+}
+
+/* ---------- Populate Model List ---------- */
+async function loadModels() {
+    try {
+        const resp = await fetch(`${OLLAMA_URL}/api/tags`);
+        if (!resp.ok) throw new Error('Failed to fetch models');
+        const data = await resp.json();
+        const select = document.getElementById('modelSelect');
+        select.innerHTML = '';
+        availableModels = [];
+        data.models.forEach(m => {
+            const opt = document.createElement('option');
+            const modelName = m.model || m.name;
+            opt.value = modelName;
+            opt.textContent = modelName;
+            select.appendChild(opt);
+            availableModels.push(modelName);
+        });
+        if (data.models.length > 0) {
+            await setDefaultModel(select);
+        }
+    } catch (err) {
+        console.error(err);
+        alert('Could not connect to Ollama API. Make sure it is running on ' + OLLAMA_URL);
+    }
+}
+
+async function setDefaultModel(selectEl) {
+    const preference = window.localStorage.getItem(MODEL_STORAGE_KEY);
+    if (preference && availableModels.includes(preference)) {
+        selectEl.value = preference;
+        await handleModelSelection(preference, { preserveHistory: true });
+        return;
+    }
+    try {
+        const resp = await fetch(`${OLLAMA_URL}/api/ps`);
+        if (!resp.ok) throw new Error('Failed to fetch running models');
+        const data = await resp.json();
+        const running = data.models && data.models.length > 0 ? (data.models[0].model || data.models[0].name) : null;
+        if (running && availableModels.includes(running)) {
+            selectEl.value = running;
+            await handleModelSelection(running, { preserveHistory: true });
+            return;
+        }
+    } catch (err) {
+        console.warn('Could not determine running model:', err);
+    }
+    const overrideModels = Object.keys(ctxOverrides || {}).filter(model => availableModels.includes(model));
+    if (overrideModels.length > 0) {
+        const overrideChoice = overrideModels[0];
+        selectEl.value = overrideChoice;
+        await handleModelSelection(overrideChoice, { preserveHistory: true });
+        return;
+    }
+    if (availableModels.length > 0) {
+        const fallback = availableModels[0];
+        selectEl.value = fallback;
+        await handleModelSelection(fallback, { preserveHistory: true });
+    }
+}
+
+function labelActiveModel(activeModel) {
+    const select = document.getElementById('modelSelect');
+    Array.from(select.options).forEach(opt => {
+        const baseLabel = opt.value;
+        opt.textContent = opt.value === activeModel ? `${baseLabel} (active)` : baseLabel;
+    });
+}
+
+async function handleModelSelection(model, { preserveHistory = false } = {}) {
+    if (!model) return;
+    selectedModel = model;
+    window.localStorage.setItem(MODEL_STORAGE_KEY, model);
+    const select = document.getElementById('modelSelect');
+    if (select && select.value !== model) {
+        select.value = model;
+    }
+    labelActiveModel(model);
+    if (!preserveHistory) {
+        conversation = [];
+        const chat = document.getElementById('chat');
+        if (chat) {
+            chat.innerHTML = '';
+        }
+    }
+    sessionOptions = {};
+    userSetContext = false;
+    currentModelContextLimit = null;
+    if (ctxOverrides[model]) {
+        sessionOptions.num_ctx = ctxOverrides[model];
+        currentModelContextLimit = ctxOverrides[model];
+        userSetContext = true;
+    }
+    await refreshModelContext(model);
+}
+
+async function refreshModelContext(model) {
+    if (!model) return;
+    try {
+        const resp = await fetch(`${OLLAMA_URL}/api/show`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify({ model })
+        });
+        if (!resp.ok) throw new Error('Failed to fetch model info');
+        const info = await resp.json();
+        let ctx = null;
+        if (typeof info.context_length === 'number') {
+            ctx = info.context_length;
+        } else if (info.model_info && typeof info.model_info.context_length === 'number') {
+            ctx = info.model_info.context_length;
+        } else if (typeof info.parameters === 'string') {
+            const match = info.parameters.match(/num_ctx\s*=\s*(\d+)/);
+            if (match) {
+                ctx = parseInt(match[1], 10);
+            }
+        }
+        if (!userSetContext && ctx) {
+            sessionOptions.num_ctx = ctx;
+        }
+        if (!currentModelContextLimit && ctx) {
+            currentModelContextLimit = ctx;
+        }
+    } catch (err) {
+        console.warn('Could not load model context information:', err);
+    }
+}
+
+/* ---------- Send Message ---------- */
+async function sendMessage() {
+    const input = document.getElementById('inputBox');
+    const rawText = input.value;
+    if (!rawText.trim()) return;
+    const trimmed = rawText.trim();
+    if (trimmed.startsWith('/')) {
+        const handled = handleSlashCommand(trimmed);
+        input.value = '';
+        if (!handled) {
+            appendStats(`unknown command: ${trimmed}`);
+        }
+        return;
+    }
+    appendMessage('user', rawText);
+    conversation.push({ role: 'user', content: rawText });
+    input.value = '';
+    await queryOllama();
+}
+
+function handleSlashCommand(command) {
+    const args = command.slice(1).trim().split(/\s+/);
+    const primary = args[0]?.toLowerCase();
+    if (primary === 'set' && args[1]?.toLowerCase() === 'parameter' && args[2]) {
+        const param = args[2];
+        const value = args[3];
+        if (param.toLowerCase() === 'num_ctx' && value) {
+            const numeric = parseInt(value, 10);
+            if (!Number.isNaN(numeric) && numeric > 0) {
+                if (!selectedModel) {
+                    appendStats('No model selected to apply num_ctx');
+                    return true;
+                }
+                sessionOptions = { ...sessionOptions, num_ctx: numeric };
+                currentModelContextLimit = numeric;
+                userSetContext = true;
+                ctxOverrides[selectedModel] = numeric;
+                try {
+                    window.localStorage.setItem(CTX_STORAGE_KEY, JSON.stringify(ctxOverrides));
+                } catch (err) {
+                    console.warn('Unable to store context override:', err);
+                }
+                appendStats(`Set parameter 'num_ctx' to '${numeric}'`);
+                return true;
+            }
+            appendStats(`Invalid num_ctx value: ${value}`);
+            return true;
+        }
+        appendStats(`Unsupported parameter: ${param}`);
+        return true;
+    }
+    if (primary === 'clear') {
+        conversation = [];
+        document.getElementById('chat').innerHTML = '';
+        appendStats('Conversation cleared');
+        return true;
+    }
+    return false;
+}
+
+/* ---------- Query Ollama ---------- */
+async function queryOllama() {
+    let placeholder = null;
+    let assistantText = '';
+    try {
+        const start = performance.now();
+        const payload = {
+            model: selectedModel,
+            messages: conversation,
+            stream: true
+        };
+        if (Object.keys(sessionOptions).length > 0) {
+            payload.options = { ...sessionOptions };
+            if (typeof payload.options.num_ctx === 'number') {
+                currentModelContextLimit = payload.options.num_ctx;
+            }
+        }
+        const resp = await fetch(`${OLLAMA_URL}/api/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        if (!resp.ok) throw new Error('Chat API returned status ' + resp.status);
+        if (!resp.body) throw new Error('Streaming not supported in this environment');
+
+        const { contentSpan } = appendMessage('assistant', '');
+        placeholder = contentSpan;
+        const chat = document.getElementById('chat');
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let finalMeta = {};
+
+        const processLine = line => {
+            if (!line) return;
+            const normalized = line.startsWith('data:') ? line.slice(5).trim() : line;
+            if (!normalized || normalized === '[DONE]') {
+                if (normalized === '[DONE]') {
+                    finalMeta.done = true;
+                }
+                return;
+            }
+            let data;
+            try {
+                data = JSON.parse(normalized);
+            } catch (err) {
+                console.warn('Unable to parse stream chunk:', err, normalized);
+                return;
+            }
+            if (data.message && typeof data.message.content === 'string') {
+                assistantText += data.message.content;
+                contentSpan.textContent = assistantText;
+                chat.scrollTop = chat.scrollHeight;
+            }
+            if (data.options && typeof data.options.num_ctx === 'number') {
+                if (!userSetContext) {
+                    sessionOptions.num_ctx = data.options.num_ctx;
+                }
+                currentModelContextLimit = data.options.num_ctx;
+            }
+            if (data.done) {
+                finalMeta = data;
+            }
+        };
+
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            let newlineIndex;
+            while ((newlineIndex = buffer.indexOf('\n')) >= 0) {
+                const line = buffer.slice(0, newlineIndex).trim();
+                buffer = buffer.slice(newlineIndex + 1);
+                processLine(line);
+            }
+        }
+        buffer += decoder.decode();
+        const remainder = buffer.trim();
+        if (remainder) {
+            processLine(remainder);
+        }
+        const end = performance.now();
+
+        if (finalMeta.error) {
+            throw new Error(finalMeta.error);
+        }
+
+        if (assistantText) {
+            conversation.push({ role: 'assistant', content: assistantText });
+        }
+
+        const promptTokens = typeof finalMeta.prompt_eval_count === 'number' ? finalMeta.prompt_eval_count : null;
+        const completionTokens = typeof finalMeta.eval_count === 'number' ? finalMeta.eval_count : null;
+        const totalTokens = (promptTokens ?? 0) + (completionTokens ?? 0);
+        const hasTokenMetrics = promptTokens !== null || completionTokens !== null;
+        const durationMs = finalMeta.total_duration ? finalMeta.total_duration / 1_000_000 : (end - start);
+        const tokensPerSecondValue = hasTokenMetrics && durationMs > 0 && totalTokens > 0 ? (totalTokens / (durationMs / 1000)) : null;
+        const tokensPerSecondLabel = tokensPerSecondValue !== null ? tokensPerSecondValue.toFixed(2) : 'n/a';
+        if (finalMeta.options && typeof finalMeta.options.num_ctx === 'number') {
+            if (!userSetContext) {
+                sessionOptions.num_ctx = finalMeta.options.num_ctx;
+            }
+            currentModelContextLimit = finalMeta.options.num_ctx;
+        }
+        const ctxUsed = promptTokens ?? 'n/a';
+        const tokensLabel = hasTokenMetrics ? formatNumber(totalTokens) : 'n/a';
+        const ctxUsedLabel = typeof ctxUsed === 'number' ? formatNumber(ctxUsed) : ctxUsed;
+        const ctxLimitValue = (payload.options && payload.options.num_ctx) ?? sessionOptions.num_ctx ?? currentModelContextLimit ?? 'n/a';
+        const ctxLimitLabel = typeof ctxLimitValue === 'number' ? formatNumber(ctxLimitValue) : ctxLimitLabel;
+        const seconds = durationMs / 1000;
+        const statsLine = `time ${seconds.toFixed(3)}s · tokens ${tokensLabel} · ${tokensPerSecondLabel} tok/s · ctx ${ctxUsedLabel}/${ctxLimitLabel}`;
+        appendStats(statsLine);
+    } catch (err) {
+        console.error(err);
+        if (placeholder) {
+            placeholder.textContent = ` ⛔ Error: ${err.message}`;
+        } else {
+            appendMessage('assistant', '⛔ Error communicating with Ollama: ' + err.message);
+        }
+    }
+}
+
+/* ---------- Event Listeners ---------- */
+document.getElementById('sendBtn').addEventListener('click', sendMessage);
+document.getElementById('inputBox').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+    }
+});
+document.getElementById('modelSelect').addEventListener('change', e => {
+    const model = e.target.value;
+    handleModelSelection(model).catch(err => console.error('Failed to switch model:', err));
+    console.log('Selected model:', model);
+});
+
+/* ---------- Initial Load ---------- */
+loadModels();
+</script>
+</body>
+</html>
